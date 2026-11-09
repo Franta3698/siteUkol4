@@ -1,57 +1,96 @@
 package utb.fai;
 
-import java.util.*;
-import java.util.concurrent.*;
+import java.util.ArrayList;
+import java.util.HashMap;
+import java.util.HashSet;
+import java.util.List;
+import java.util.Map;
+import java.util.Set;
 
 public class ActiveHandlers {
 
-    private final Set<SocketHandler> activeHandlers = new HashSet<>();
+    private final int maxConnections;
+
+    private final Set<SocketHandler> clients = new HashSet<>();
 
     private final Map<String, SocketHandler> users = new HashMap<>();
 
     private final Map<String, Set<SocketHandler>> groups = new HashMap<>();
 
-    public ActiveHandlers() {
+    public ActiveHandlers(int maxConnections) {
+        this.maxConnections = maxConnections;
+
         groups.put("public", new HashSet<>());
     }
 
-    // Přidání nového klienta
-    public synchronized void add(SocketHandler handler) {
-        activeHandlers.add(handler);
-        join(handler, "public");
+    public synchronized int getClientCount() {
+        return clients.size();
     }
 
-    // Odstranění klienta
-    public synchronized void remove(SocketHandler handler) {
-        activeHandlers.remove(handler);
+    public synchronized void addClient(SocketHandler handler) {
 
-        if (handler.username != null) {
-            users.remove(handler.username);
+        if (clients.size() >= maxConnections) {
+            handler.disconnect();
+            return;
         }
 
-        for (Set<SocketHandler> members : groups.values()) {
-            members.remove(handler);
+        clients.add(handler);
+
+        handler.addGroup("public");
+        groups.get("public").add(handler);
+    }
+
+    public synchronized void removeClient(SocketHandler handler) {
+
+        clients.remove(handler);
+
+        if (handler.getUsername() != null) {
+            users.remove(handler.getUsername(), handler);
+        }
+
+        for (String groupName : new HashSet<>(handler.getGroups())) {
+
+            Set<SocketHandler> group = groups.get(groupName);
+
+            if (group != null) {
+                group.remove(handler);
+
+                if (group.isEmpty() && !groupName.equals("public")) {
+                    groups.remove(groupName);
+                }
+            }
         }
     }
 
-    // Nastavení uživatelského jména
+    // Nastavení nebo změna uživatelského jména.
     public synchronized boolean setName(SocketHandler handler, String name) {
 
-        if (name == null || name.isEmpty() || name.contains(" ")) {
-            handler.sendMessage("Invalid username!");
+        if (name == null || name.trim().isEmpty()) {
+            handler.sendMessage("Username cannot be empty!");
             return false;
         }
 
-        if (users.containsKey(name)) {
+        name = name.trim();
+
+        if (name.contains(" ")) {
+            handler.sendMessage("Username cannot contain spaces!");
+            return false;
+        }
+
+        SocketHandler existingUser = users.get(name);
+
+        if (existingUser != null && existingUser != handler) {
             handler.sendMessage("Username is already taken!");
             return false;
         }
 
-        if (handler.username != null) {
-            users.remove(handler.username);
+        String oldName = handler.getUsername();
+
+        if (oldName != null) {
+            users.remove(oldName, handler);
         }
 
-        handler.username = name;
+        handler.setUsername(name);
         users.put(name, handler);
 
         handler.sendMessage("Your name is now " + name);
@@ -59,93 +98,121 @@ public class ActiveHandlers {
         return true;
     }
 
-    // Soukromá zpráva
-    public synchronized void sendPrivate(SocketHandler sender, String targetName, String message) {
+    // Odeslání běžné zprávy ostatním klientům ve společné místnosti.
+    public synchronized void broadcast(SocketHandler sender, String message) {
 
-        if (sender.username == null) {
+        if (sender.getUsername() == null) {
             sender.sendMessage("Set your name first!");
             return;
         }
 
-        SocketHandler target = users.get(targetName);
+        String formattedMessage =
+                "[" + sender.getUsername() + "] >> " + message;
 
-        if (target == null) {
+        for (SocketHandler client : clients) {
+
+            if (client == sender) {
+                continue;
+            }
+
+            if (sharesGroup(sender, client)) {
+                client.sendMessage(formattedMessage);
+            }
+        }
+    }
+
+    // Kontrola, zda dva klienti sdílejí alespoň jednu místnost.
+    private boolean sharesGroup(SocketHandler first, SocketHandler second) {
+
+        for (String groupName : first.getGroups()) {
+
+            if (second.getGroups().contains(groupName)) {
+                return true;
+            }
+        }
+
+        return false;
+    }
+
+    // Soukromá zpráva konkrétnímu uživateli.
+    public synchronized void sendPrivate(
+            SocketHandler sender,
+            String recipientName,
+            String message
+    ) {
+
+        if (sender.getUsername() == null) {
+            sender.sendMessage("Set your name first!");
+            return;
+        }
+
+        SocketHandler recipient = users.get(recipientName);
+
+        if (recipient == null) {
             sender.sendMessage("User not found!");
             return;
         }
 
-        target.sendMessage("[private][" + sender.username + "] >> " + message);
+        recipient.sendMessage(
+                "[" + sender.getUsername() + "] >> " + message
+        );
     }
 
-    // Připojení do místnosti
-    public synchronized void join(SocketHandler handler, String groupName) {
+    // Připojení klienta do místnosti.
+    public synchronized void joinGroup(SocketHandler handler, String groupName) {
 
-        if (groupName == null || groupName.isEmpty()) {
-            handler.sendMessage("Invalid group name!");
+        if (groupName == null || groupName.trim().isEmpty()) {
+            handler.sendMessage("Group name cannot be empty!");
+            return;
+        }
+
+        groupName = groupName.trim();
+
+        if (groupName.contains(" ")) {
+            handler.sendMessage("Group name cannot contain spaces!");
             return;
         }
 
         groups.putIfAbsent(groupName, new HashSet<>());
 
-        Set<SocketHandler> members = groups.get(groupName);
+        groups.get(groupName).add(handler);
+        handler.addGroup(groupName);
 
-        if (members.add(handler)) {
-            handler.groups.add(groupName);
-            handler.sendMessage("Joined group: " + groupName);
-        } else {
-            handler.sendMessage("You are already in this group!");
-        }
+        handler.sendMessage("Joined group: " + groupName);
     }
 
-    // Opuštění místnosti
-    public synchronized void leave(SocketHandler handler, String groupName) {
+    // Odpojení klienta z místnosti.
+    public synchronized void leaveGroup(SocketHandler handler, String groupName) {
 
-        Set<SocketHandler> members = groups.get(groupName);
+        if (groupName == null || groupName.trim().isEmpty()) {
+            handler.sendMessage("Group name cannot be empty!");
+            return;
+        }
 
-        if (members == null || !members.remove(handler)) {
+        groupName = groupName.trim();
+
+        Set<SocketHandler> group = groups.get(groupName);
+
+        if (group == null || !group.contains(handler)) {
             handler.sendMessage("You are not in this group!");
             return;
         }
 
-        handler.groups.remove(groupName);
+        group.remove(handler);
+        handler.removeGroup(groupName);
+
+        if (group.isEmpty() && !groupName.equals("public")) {
+            groups.remove(groupName);
+        }
+
         handler.sendMessage("Left group: " + groupName);
     }
 
-    // Výpis místností uživatele
-    public synchronized void listGroups(SocketHandler handler) {
+    // Vrácení seznamu místností, ve kterých je klient připojen.
+    public synchronized void sendGroups(SocketHandler handler) {
 
-        String result = String.join(",", handler.groups);
-        handler.sendMessage(result);
-    }
+        List<String> groupNames = new ArrayList<>(handler.getGroups());
 
-    // Rozeslání běžné zprávy členům společné místnosti
-    public synchronized void sendMessageToGroups(SocketHandler sender, String message) {
-
-        if (sender.username == null) {
-            sender.sendMessage("Set your name first!");
-            return;
-        }
-
-        String formattedMessage = "[" + sender.username + "] >> " + message;
-
-        for (String groupName : sender.groups) {
-
-            Set<SocketHandler> members = groups.get(groupName);
-
-            if (members == null) {
-                continue;
-            }
-
-            for (SocketHandler handler : members) {
-
-                if (handler != sender) {
-                    handler.sendMessage(formattedMessage);
-                }
-            }
-        }
-    }
-
-    public synchronized int getClientCount() {
-        return activeHandlers.size();
+        handler.sendMessage(String.join(",", groupNames));
     }
 }

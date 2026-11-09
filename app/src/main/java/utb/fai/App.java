@@ -6,62 +6,88 @@ import java.util.concurrent.*;
 
 public class App {
 
-	public static void main(String[] args) {
-		int port = 33000, max_conn = 2;
+    public static void main(String[] args) {
 
-		if (args.length > 0) {
-			if (args[0].startsWith("--help")) {
-				System.out.printf("Usage: Server [PORT] [MAX_CONNECTIONS]\n" +
-						"If PORT is not specified, default port %d is used\n" +
-						"If MAX_CONNECTIONS is not specified, default number=%d is used", port, max_conn);
-				return;
-			}
-			try {
-				port = Integer.decode(args[0]);
-			} catch (NumberFormatException e) {
-				System.err.printf("Argument %s is not integer, using default value", args[0], port);
-			}
-			if (args.length > 1)
-				try {
-					max_conn = Integer.decode(args[1]);
-				} catch (NumberFormatException e) {
-					System.err.printf("Argument %s is not integer, using default value", args[1], max_conn);
-				}
+        int port = 33000;
+        int max_conn = 2;
 
-		}
-		// TODO Auto-generated method stub
-		System.out.printf("IM server listening on port %d, maximum nr. of connections=%d...\n", port, max_conn);
-		ExecutorService pool = Executors.newFixedThreadPool(2 * max_conn);
-		ActiveHandlers activeHandlers = new ActiveHandlers();
+        if (args.length > 0) {
 
-		try {
-			ServerSocket sSocket = new ServerSocket(port);
-			do {
-				Socket clientSocket = sSocket.accept();
-				clientSocket.setKeepAlive(true);
-				SocketHandler handler = new SocketHandler(clientSocket, activeHandlers);
-				pool.execute(handler.inputHandler);
-				pool.execute(handler.outputHandler);
-			} while (!pool.isTerminated());
-		} catch (UnknownHostException e) {
-			e.printStackTrace();
-		} catch (IOException e) {
-			e.printStackTrace();
-			pool.shutdown();
-			try {
-				// Wait a while for existing tasks to terminate
-				if (!pool.awaitTermination(60, TimeUnit.SECONDS)) {
-					pool.shutdownNow(); // Cancel currently executing tasks
-					// Wait a while for tasks to respond to being cancelled
-					if (!pool.awaitTermination(60, TimeUnit.SECONDS))
-						System.err.println("Pool did not terminate");
-				}
-			} catch (InterruptedException ie) {
-				// (Re-)Cancel if current thread also interrupted
-				pool.shutdownNow();
-				// Preserve interrupt status
-				Thread.currentThread().interrupt();
-			}
-		}
-	}
+            if (args[0].equals("--help")) {
+                System.out.println(
+                        "Usage: Server [PORT] [MAX_CONNECTIONS]\n" +
+                        "Default port: 33000\n" +
+                        "Default max connections: 2");
+                return;
+            }
+
+            try {
+                port = Integer.parseInt(args[0]);
+            } catch (NumberFormatException e) {
+                System.err.println("Invalid port!");
+                return;
+            }
+        }
+
+        if (args.length > 1) {
+
+            try {
+                max_conn = Integer.parseInt(args[1]);
+            } catch (NumberFormatException e) {
+                System.err.println("Invalid maximum connections!");
+                return;
+            }
+        }
+
+        if (port < 1 || port > 65535 || max_conn < 1) {
+            System.err.println("Invalid server parameters!");
+            return;
+        }
+
+        System.out.printf(
+                "IM server listening on port %d, maximum nr. of connections=%d...\n",
+                port, max_conn);
+
+        ExecutorService pool = Executors.newFixedThreadPool(2 * max_conn);
+
+        ActiveHandlers activeHandlers = new ActiveHandlers();
+
+        try (ServerSocket serverSocket = new ServerSocket(port)) {
+
+            while (!pool.isShutdown()) {
+
+                Socket clientSocket = serverSocket.accept();
+
+                if (activeHandlers.getClientCount() >= max_conn) {
+                    clientSocket.close();
+                    continue;
+                }
+
+                clientSocket.setKeepAlive(true);
+
+                SocketHandler handler = new SocketHandler(
+                        clientSocket, activeHandlers);
+
+                pool.execute(handler.inputHandler);
+                pool.execute(handler.outputHandler);
+            }
+
+        } catch (IOException e) {
+
+            System.err.println("Server error: " + e.getMessage());
+
+        } finally {
+
+            pool.shutdownNow();
+
+            try {
+                if (!pool.awaitTermination(10, TimeUnit.SECONDS)) {
+                    System.err.println("Thread pool did not terminate.");
+                }
+            } catch (InterruptedException e) {
+                pool.shutdownNow();
+                Thread.currentThread().interrupt();
+            }
+        }
+    }
 }
